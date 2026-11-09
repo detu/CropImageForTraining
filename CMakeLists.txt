@@ -1,8 +1,11 @@
-cmake_minimum_required(VERSION 4.2)
-project(ImageCropper)
+cmake_minimum_required(VERSION 3.16)
+project(ImageCropper LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
-find_package(OpenCV REQUIRED)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_AUTOMOC ON)
+
+find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 add_executable(ImageCropper main.cpp)
-target_link_libraries(ImageCropper PRIVATE ${OpenCV_LIBS})
+target_link_libraries(ImageCropper PRIVATE Qt6::Widgets)
