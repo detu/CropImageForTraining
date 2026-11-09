@@ -4,6 +4,11 @@
 // Controls:
 //   Mouse move         : move the crop box
 //   Left click         : save the crop (you can crop the same image many times)
+//   Mouse wheel        : zoom in / out around the mouse cursor
+//   + / -              : zoom in / out
+//   0 or F             : fit the whole image to the window
+//   1                  : zoom to 100% (1 image pixel = 1 screen pixel)
+//   Right/middle drag  : pan the zoomed image
 //   Space / Enter / N  : next image
 //   Backspace / P      : previous image
 //   Esc                : skip the current image (same as next)
@@ -15,6 +20,7 @@
 //   3rd crop : crop_<name>_2.<ext>   ... and so on.
 
 #include <QApplication>
+#include <QCursor>
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
@@ -25,18 +31,21 @@
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QResizeEvent>
 #include <QStatusBar>
+#include <QWheelEvent>
 #include <QWidget>
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 
 namespace {
 
 constexpr int kCropSize = 640;
 
-// Widget that displays an image scaled to fit, draws the crop box under the
-// mouse, and reports clicks in image coordinates.
+// Widget that displays an image (zoomable and pannable), draws the crop box
+// under the mouse, and reports clicks in image coordinates.
 class CropCanvas : public QWidget {
     Q_OBJECT
 public:
@@ -50,7 +59,7 @@ public:
         image_ = img;
         savedRects_.clear();
         roi_ = QRect(0, 0, kCropSize, kCropSize);
-        update();
+        fitToWindow();
     }
 
     void addSavedRect(const QRect& r) {
@@ -59,9 +68,42 @@ public:
     }
 
     QRect roi() const { return roi_; }
+    double zoom() const { return scale_; }
+
+    // Scale the whole image to fit the widget (the default view).
+    void fitToWindow() {
+        fitMode_ = true;
+        if (!image_.isNull()) {
+            scale_ = fitScale();
+            clampOffset();
+        }
+        update();
+        emit zoomChanged(scale_);
+    }
+
+    // Multiply the zoom by `factor`, keeping the image point under `anchor`
+    // (widget coordinates) fixed on screen.
+    void zoomBy(double factor, const QPointF& anchor) {
+        if (image_.isNull()) return;
+        const double minScale = std::min(fitScale(), 1.0) * 0.5;
+        const double newScale = std::clamp(scale_ * factor, minScale, kMaxZoom);
+        if (newScale == scale_) return;
+        const QPointF imgPt = (anchor - offset_) / scale_;
+        scale_ = newScale;
+        offset_ = anchor - imgPt * scale_;
+        fitMode_ = false;
+        clampOffset();
+        updateRoi(mapFromGlobal(QCursor::pos()));
+        emit zoomChanged(scale_);
+    }
+
+    void zoomTo(double newScale) { zoomBy(newScale / scale_, rect().center()); }
+    void zoomIn() { zoomBy(kZoomStep, rect().center()); }
+    void zoomOut() { zoomBy(1.0 / kZoomStep, rect().center()); }
 
 signals:
     void cropRequested(const QRect& roi);
+    void zoomChanged(double scale);
 
 protected:
     void paintEvent(QPaintEvent*) override {
@@ -69,14 +111,18 @@ protected:
         p.fillRect(rect(), Qt::darkGray);
         if (image_.isNull()) return;
 
-        const QRectF target = imageTargetRect();
-        p.setRenderHint(QPainter::SmoothPixmapTransform);
-        p.drawImage(target, image_);
+        // Draw only the visible part of the image (fast at high zoom).
+        const QRectF imgRect(offset_, QSizeF(image_.width() * scale_, image_.height() * scale_));
+        const QRectF visible = imgRect.intersected(QRectF(rect()));
+        if (!visible.isEmpty()) {
+            const QRectF src((visible.topLeft() - offset_) / scale_, visible.size() / scale_);
+            // Smooth when shrinking; show sharp pixels when zoomed in a lot.
+            p.setRenderHint(QPainter::SmoothPixmapTransform, scale_ < 2.0);
+            p.drawImage(visible, image_, src);
+        }
 
-        const double s = scale();
         auto toWidget = [&](const QRect& r) {
-            return QRectF(target.left() + r.x() * s, target.top() + r.y() * s,
-                          r.width() * s, r.height() * s);
+            return QRectF(offset_ + QPointF(r.topLeft()) * scale_, QSizeF(r.size()) * scale_);
         };
 
         // Crops already saved from this image.
@@ -88,40 +134,98 @@ protected:
         p.drawRect(toWidget(roi_));
     }
 
+    void resizeEvent(QResizeEvent*) override {
+        if (image_.isNull()) return;
+        if (fitMode_) {
+            fitToWindow();
+        } else {
+            clampOffset();
+        }
+    }
+
+    void wheelEvent(QWheelEvent* e) override {
+        const double steps = e->angleDelta().y() / 120.0;
+        if (steps != 0) zoomBy(std::pow(kZoomStep, steps), e->position());
+        e->accept();
+    }
+
     void mouseMoveEvent(QMouseEvent* e) override {
+        if (panning_) {
+            offset_ += e->position() - panStart_;
+            panStart_ = e->position();
+            clampOffset();
+            update();
+            return;
+        }
         updateRoi(e->position());
     }
 
     void mousePressEvent(QMouseEvent* e) override {
-        if (image_.isNull() || e->button() != Qt::LeftButton) return;
+        if (image_.isNull()) return;
+        if (e->button() == Qt::RightButton || e->button() == Qt::MiddleButton) {
+            panning_ = true;
+            panStart_ = e->position();
+            setCursor(Qt::ClosedHandCursor);
+            return;
+        }
+        if (e->button() != Qt::LeftButton) return;
         updateRoi(e->position());
         emit cropRequested(roi_);
     }
 
-private:
-    double scale() const {
-        if (image_.isNull()) return 1.0;
-        return std::min(double(width()) / image_.width(),
-                        double(height()) / image_.height());
+    void mouseReleaseEvent(QMouseEvent* e) override {
+        if (panning_ && (e->button() == Qt::RightButton || e->button() == Qt::MiddleButton)) {
+            panning_ = false;
+            unsetCursor();
+            updateRoi(e->position());
+        }
     }
 
-    QRectF imageTargetRect() const {
-        const double s = scale();
-        const double w = image_.width() * s;
-        const double h = image_.height() * s;
-        return QRectF((width() - w) / 2.0, (height() - h) / 2.0, w, h);
+    void keyPressEvent(QKeyEvent* e) override {
+        switch (e->key()) {
+        case Qt::Key_Plus:
+        case Qt::Key_Equal:
+            zoomIn();
+            break;
+        case Qt::Key_Minus:
+            zoomOut();
+            break;
+        case Qt::Key_0:
+        case Qt::Key_F:
+            fitToWindow();
+            break;
+        case Qt::Key_1:
+            zoomTo(1.0);
+            break;
+        default:
+            QWidget::keyPressEvent(e);  // let the main window handle it
+        }
+    }
+
+private:
+    static constexpr double kZoomStep = 1.25;
+    static constexpr double kMaxZoom = 16.0;
+
+    double fitScale() const {
+        return std::min(double(width()) / image_.width(), double(height()) / image_.height());
+    }
+
+    // Center the image along an axis where it is smaller than the widget;
+    // otherwise keep it from being panned past its edges.
+    void clampOffset() {
+        const double w = image_.width() * scale_;
+        const double h = image_.height() * scale_;
+        offset_.setX(w <= width() ? (width() - w) / 2.0 : std::clamp(offset_.x(), width() - w, 0.0));
+        offset_.setY(h <= height() ? (height() - h) / 2.0
+                                   : std::clamp(offset_.y(), height() - h, 0.0));
     }
 
     // Center the crop box on the mouse, clamped to the image bounds.
     void updateRoi(const QPointF& widgetPos) {
         if (image_.isNull()) return;
-        const QRectF target = imageTargetRect();
-        const double s = scale();
-        const int x = int((widgetPos.x() - target.left()) / s);
-        const int y = int((widgetPos.y() - target.top()) / s);
-
-        const int left = std::clamp(x - kCropSize / 2, 0, image_.width() - kCropSize);
-        const int top = std::clamp(y - kCropSize / 2, 0, image_.height() - kCropSize);
+        const QPointF imgPt = (widgetPos - offset_) / scale_;
+        const int left = std::clamp(int(imgPt.x()) - kCropSize / 2, 0, image_.width() - kCropSize);
+        const int top = std::clamp(int(imgPt.y()) - kCropSize / 2, 0, image_.height() - kCropSize);
         roi_ = QRect(left, top, kCropSize, kCropSize);
         update();
     }
@@ -129,6 +233,11 @@ private:
     QImage image_;
     QRect roi_;
     QVector<QRect> savedRects_;
+    double scale_ = 1.0;   // widget pixels per image pixel
+    QPointF offset_;       // widget position of the image's top-left corner
+    bool fitMode_ = true;  // re-fit on resize until the user zooms
+    bool panning_ = false;
+    QPointF panStart_;
 };
 
 class MainWindow : public QMainWindow {
@@ -141,9 +250,10 @@ public:
         info_ = new QLabel(this);
         statusBar()->addWidget(info_, 1);
         statusBar()->addPermanentWidget(
-            new QLabel("Click: Save crop | Space/Enter/N: Next | Backspace/P: Previous | "
-                       "Esc: Skip | Q: Quit"));
+            new QLabel("Click: Save | Wheel/+/-: Zoom | 0: Fit | 1: 100% | Right-drag: Pan | "
+                       "Space: Next | Backspace: Prev | Esc: Skip | Q: Quit"));
         connect(canvas_, &CropCanvas::cropRequested, this, &MainWindow::saveCrop);
+        connect(canvas_, &CropCanvas::zoomChanged, this, [this] { updateInfo(); });
         resize(1280, 900);
         loadIndex(0, +1);
     }
@@ -241,12 +351,13 @@ private:
     }
 
     void updateInfo() {
-        info_->setText(QString("[%1/%2] %3  (%4x%5)  crops saved: %6")
+        info_->setText(QString("[%1/%2] %3  (%4x%5)  zoom: %6%  crops saved: %7")
                            .arg(index_ + 1)
                            .arg(files_.size())
                            .arg(currentName())
                            .arg(current_.width())
                            .arg(current_.height())
+                           .arg(qRound(canvas_->zoom() * 100))
                            .arg(cropsThisImage_));
         setWindowTitle("Crop Tool - " + currentName());
     }

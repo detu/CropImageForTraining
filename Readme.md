@@ -25,13 +25,19 @@ Images smaller than 640 x 640 are skipped.
 |------------------------|-------------------------------------------|
 | Mouse move             | Move the 640 x 640 crop box               |
 | Left click             | Save the crop (repeat for more crops)     |
+| Mouse wheel            | Zoom in / out around the mouse cursor     |
+| + / -                  | Zoom in / out                             |
+| 0 or F                 | Fit the whole image to the window         |
+| 1                      | Zoom to 100% (1 image px = 1 screen px)   |
+| Right or middle drag   | Pan the zoomed image                      |
 | Space / Enter / N      | Next image                                |
 | Backspace / P          | Previous image                            |
 | Esc                    | Skip the current image                    |
 | Q                      | Quit                                      |
 
-The image is scaled to fit the window; crops are always taken at full
-resolution. Crops already saved from the current image are shown as dashed
+Each image opens scaled to fit the window. Zooming only changes the view:
+crops are always 640 x 640 pixels of the original image. The current zoom
+level is shown in the status bar. Crops already saved from the current image are shown as dashed
 yellow boxes.
 
 ## Output naming
